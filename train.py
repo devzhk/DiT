@@ -36,6 +36,13 @@ from train_utils.datasets import ImageNetLatentDataset
 #################################################################################
 #                             Training Helper Functions                         #
 #################################################################################
+def sample(moments, scale_factor=0.18215):
+    mean, logvar = torch.chunk(moments, 2, dim=1)
+    logvar = torch.clamp(logvar, -30.0, 20.0)
+    std = torch.exp(0.5 * logvar)
+    z = mean + std * torch.randn_like(mean)
+    z = scale_factor * z
+    return z
 
 
 def onehot2int(label_vec):
@@ -205,7 +212,7 @@ def main(args):
         for x, y in loader:
             x = x.to(device)
             y = onehot2int(y).to(device)
-            
+            x = sample(x) 
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
             model_kwargs = dict(y=y)
             loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
