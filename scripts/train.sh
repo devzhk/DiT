@@ -1,7 +1,7 @@
 ngc batch run \
 --name "ml-model.DiT-XL2-train" \
 --commandline "cd /diffusion_ws/Code/DiT; git config --global --add safe.directory /diffusion_ws/Code/DiT; \
-torchrun --nnodes=1 --nproc_per_node=8 train.py --config configs/imagenet-latent.yaml --data-path no --global-batch-size 256" \
+bash scripts/train-latent.sh" \
 --image "nvidia/pytorch:23.03-py3" \
 --ace nv-us-west-3 \
 --instance dgxa100.80g.8.norm \
