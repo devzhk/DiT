@@ -29,12 +29,23 @@ import os
 
 from models import DiT_models
 from diffusion import create_diffusion
-from diffusers.models import AutoencoderKL
 
+from omegaconf import OmegaConf
+from train_utils.datasets import ImageNetLatentDataset
 
 #################################################################################
 #                             Training Helper Functions                         #
 #################################################################################
+
+
+def onehot2int(label_vec):
+    """
+    Find one-hot vector index.
+    Args:
+        label_vec: A one-hot vector of shape (batch_size, num_classes).
+    """
+    return torch.argmax(label_vec, dim=1)
+
 
 @torch.no_grad()
 def update_ema(ema_model, model, decay=0.9999):
@@ -112,7 +123,7 @@ def main(args):
     Trains a new DiT model.
     """
     assert torch.cuda.is_available(), "Training currently requires at least one GPU."
-
+    config = OmegaConf.load(args.config)
     # Setup DDP:
     dist.init_process_group("nccl")
     assert args.global_batch_size % dist.get_world_size() == 0, f"Batch size must be divisible by world size."
@@ -148,20 +159,16 @@ def main(args):
     requires_grad(ema, False)
     model = DDP(model.to(device), device_ids=[rank])
     diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
-    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
     logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
 
     # Setup data:
-    transform = transforms.Compose([
-        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.image_size)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
-    ])
-    dataset = ImageFolder(args.data_path, transform=transform)
+    dataset = ImageNetLatentDataset(config.data.root, 
+                                    resolution=config.data.resolution, 
+                                    num_channels=config.data.num_channels)
+    
     sampler = DistributedSampler(
         dataset,
         num_replicas=dist.get_world_size(),
@@ -178,7 +185,7 @@ def main(args):
         pin_memory=True,
         drop_last=True
     )
-    logger.info(f"Dataset contains {len(dataset):,} images ({args.data_path})")
+    logger.info(f"Dataset contains {len(dataset):,} images ({config.data.root})")
 
     # Prepare models for training:
     update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
@@ -197,10 +204,8 @@ def main(args):
         logger.info(f"Beginning epoch {epoch}...")
         for x, y in loader:
             x = x.to(device)
-            y = y.to(device)
-            with torch.no_grad():
-                # Map input images to latent space + normalize latents:
-                x = vae.encode(x).latent_dist.sample().mul_(0.18215)
+            y = onehot2int(y).to(device)
+            
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
             model_kwargs = dict(y=y)
             loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
@@ -253,6 +258,8 @@ def main(args):
 if __name__ == "__main__":
     # Default args here will train DiT-XL/2 with the hyperparameters we used in our paper (except training iters).
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="configs/imagenet-latent.yaml")
+
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--results-dir", type=str, default="results")
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")

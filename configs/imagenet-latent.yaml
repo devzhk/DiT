@@ -1,0 +1,6 @@
+data:
+  dataset: imagenet256-latent
+  category: lmdb
+  resolution: 32
+  num_channels: 4
+  root: /imagenet_256_latent_lmdb
