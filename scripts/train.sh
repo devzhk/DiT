@@ -5,7 +5,7 @@ bash scripts/train-latent.sh" \
 --image "nvidia/pytorch:23.03-py3" \
 --ace nv-us-west-3 \
 --instance dgxa100.80g.8.norm \
---priority LOW \
+--priority NORMAL \
 --total-runtime 168h \
 --workspace ReY8v22xQoqdGPDyMwZ75g:/diffusion_ws \
 --datasetid 1602645:/imagenet_256_latent_lmdb \

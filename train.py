@@ -183,9 +183,11 @@ def main(args):
         shuffle=True,
         seed=args.global_seed
     )
+    batch_size_per_gpu = int(args.global_batch_size // dist.get_world_size())
+    num_grad_accum = batch_size_per_gpu // args.microbatch
     loader = DataLoader(
         dataset,
-        batch_size=int(args.global_batch_size // dist.get_world_size()),
+        batch_size=batch_size_per_gpu,
         shuffle=False,
         sampler=sampler,
         num_workers=args.num_workers,
@@ -214,16 +216,22 @@ def main(args):
             y = onehot2int(y).to(device)
             x = sample(x) 
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-            model_kwargs = dict(y=y)
-            loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
-            loss = loss_dict["loss"].mean()
+            # model_kwargs = dict(y=y)
             opt.zero_grad()
-            loss.backward()
+            for i in range(num_grad_accum):
+                x_ = x[i * args.microbatch: (i + 1) * args.microbatch]
+                y_ = y[i * args.microbatch: (i + 1) * args.microbatch]
+                t_ = t[i * args.microbatch: (i + 1) * args.microbatch]
+                model_kwargs = dict(y=y_)
+        
+                loss_dict = diffusion.training_losses(model, x_, t_, model_kwargs)
+                loss = loss_dict["loss"].sum().mul(1 / batch_size_per_gpu)
+                loss.backward()
+                running_loss += loss.item()
             opt.step()
             update_ema(ema, model.module)
-
             # Log loss values:
-            running_loss += loss.item()
+            
             log_steps += 1
             train_steps += 1
             if train_steps % args.log_every == 0:
@@ -274,6 +282,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument("--epochs", type=int, default=1400)
     parser.add_argument("--global-batch-size", type=int, default=256)
+    parser.add_argument('--microbatch', type=int, default=32)
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="ema")  # Choice doesn't affect training
     parser.add_argument("--num-workers", type=int, default=4)
