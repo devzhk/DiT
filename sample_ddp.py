@@ -60,6 +60,7 @@ def generate(model, diffusion, vae,
              iterations=1000, n=50, latent_size=32):
     pbar = range(iterations)
     pbar = tqdm(pbar) if rank == 0 else pbar
+    total = 0
     for _ in pbar:
         # Sample inputs:
         z = torch.randn(n, model.in_channels, latent_size, latent_size, device=device)
@@ -90,7 +91,8 @@ def generate(model, diffusion, vae,
         for i, sample in enumerate(samples):
             index = i * dist.get_world_size() + rank
             Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
-    print(f'Rank {rank} finished sampling {iterations} images.')
+        total += n * dist.get_world_size()
+    print(f'Rank {rank} finished sampling {iterations} batches.')
 
 
 def main(args):
@@ -134,7 +136,7 @@ def main(args):
     samples_needed_this_gpu = int(total_samples // dist.get_world_size())
     assert samples_needed_this_gpu % n == 0, "samples_needed_this_gpu must be divisible by the per-GPU batch size"
     iterations = int(samples_needed_this_gpu // n)
-    
+    print(f'{iterations} batches')
     for ckpt_id in range(args.id_min, args.id_max, args.id_step):
         ckpt_path = os.path.join(args.ckpt_dir, f"{ckpt_id:07d}.pt")
         state_dict = find_model(ckpt_path)
