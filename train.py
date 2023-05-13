@@ -197,12 +197,20 @@ def main(args):
     logger.info(f"Dataset contains {len(dataset):,} images ({config.data.root})")
 
     # Prepare models for training:
-    update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
+    if args.ckpt is not None:  # Load from checkpoint if provided
+        logger.info(f"Loading checkpoint from {args.ckpt}")
+        train_steps = int(os.path.basename(args.ckpt).split(".")[0])  # Get the training step number from the ckpt name
+        ckpt = torch.load(args.ckpt, map_location=device)
+        model.load_state_dict(ckpt["model"])
+        opt.load_state_dict(ckpt["opt"])
+        ema.load_state_dict(ckpt["ema"])
+    else:
+        train_steps = 0
+        update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
     model.train()  # important! This enables embedding dropout for classifier-free guidance
     ema.eval()  # EMA model should always be in eval mode
 
     # Variables for monitoring/logging purposes:
-    train_steps = 0
     log_steps = 0
     running_loss = 0
     start_time = time()
@@ -288,5 +296,6 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=50_000)
+    parser.add_argument('--ckpt', type=str, default=None)
     args = parser.parse_args()
     main(args)
