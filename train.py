@@ -160,17 +160,27 @@ def main(args):
     model = DiT_models[args.model](
         input_size=latent_size,
         num_classes=args.num_classes
-    )
+    ).to(device)
     # Note that parameter initialization is done within the DiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     requires_grad(ema, False)
-    model = DDP(model.to(device), device_ids=[rank])
+    
     diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
     logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
-
+    if args.ckpt is not None:  # Load from checkpoint if provided
+        logger.info(f"Loading checkpoint from {args.ckpt}")
+        train_steps = int(os.path.basename(args.ckpt).split(".")[0])  # Get the training step number from the ckpt name
+        ckpt = torch.load(args.ckpt, map_location=torch.device('cuda'))
+        model.load_state_dict(ckpt["model"])
+        opt.load_state_dict(ckpt["opt"])
+        ema.load_state_dict(ckpt["ema"])
+    else:
+        train_steps = 0
+        update_ema(ema, model, decay=0)  # Ensure EMA is initialized with synced weights
+    model = DDP(model, device_ids=[rank]) 
     # Setup data:
     dataset = ImageNetLatentDataset(config.data.root, 
                                     resolution=config.data.resolution, 
@@ -197,16 +207,6 @@ def main(args):
     logger.info(f"Dataset contains {len(dataset):,} images ({config.data.root})")
 
     # Prepare models for training:
-    if args.ckpt is not None:  # Load from checkpoint if provided
-        logger.info(f"Loading checkpoint from {args.ckpt}")
-        train_steps = int(os.path.basename(args.ckpt).split(".")[0])  # Get the training step number from the ckpt name
-        ckpt = torch.load(args.ckpt, map_location=device)
-        model.load_state_dict(ckpt["model"])
-        opt.load_state_dict(ckpt["opt"])
-        ema.load_state_dict(ckpt["ema"])
-    else:
-        train_steps = 0
-        update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
     model.train()  # important! This enables embedding dropout for classifier-free guidance
     ema.eval()  # EMA model should always be in eval mode
 
