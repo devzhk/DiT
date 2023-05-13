@@ -110,11 +110,6 @@ def main(args):
     torch.cuda.set_device(device)
     print(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
 
-    if args.ckpt is None:
-        assert args.model == "DiT-XL/2", "Only DiT-XL/2 models are available for auto-download."
-        assert args.image_size in [256, 512]
-        assert args.num_classes == 1000
-
     # Load model:
     latent_size = args.image_size // 8
     model = DiT_models[args.model](
@@ -170,7 +165,7 @@ if __name__ == "__main__":
     parser.add_argument("--cfg-scale",  type=float, default=1.0)
     parser.add_argument("--num-sampling-steps", type=int, default=250)
     parser.add_argument("--global-seed", type=int, default=0)
-    parser.add_argument("--tf32", action=argparse.BooleanOptionalAction, default=True,
+    parser.add_argument("--tf32", action='store_true', default=True,
                         help="By default, use TF32 matmuls. This massively accelerates sampling on Ampere GPUs.")
     parser.add_argument("--ckpt_dir", type=str, default=None,
                         help="Optional path to a DiT checkpoint (default: auto-download a pre-trained DiT-XL/2 model).")
