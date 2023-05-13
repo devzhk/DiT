@@ -150,6 +150,8 @@ def main(args):
         generate(model, diffusion, vae, sample_folder_dir, rank, 
                 device, args.cfg_scale, iterations, n, latent_size)
         dist.barrier()
+        if rank == 0:
+            create_npz_from_sample_folder(sample_folder_dir, args.num_fid_samples)
     dist.destroy_process_group()
 
 
