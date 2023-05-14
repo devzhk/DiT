@@ -89,7 +89,7 @@ def generate(model, diffusion, vae,
 
         # Save samples to disk as individual .png files
         for i, sample in enumerate(samples):
-            index = i * dist.get_world_size() + rank
+            index = i * dist.get_world_size() + rank + total
             Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
         total += n * dist.get_world_size()
     print(f'Rank {rank} finished sampling {iterations} batches.')
