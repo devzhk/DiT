@@ -145,9 +145,10 @@ def main(args):
         model_string_name = args.model.replace("/", "-")
         ckpt_string_name = os.path.basename(ckpt_path).replace(".pt", "")
         folder_name = f"{model_string_name}-{ckpt_string_name}-size-{args.image_size}-vae-{args.vae}-cfg-{args.cfg_scale}-seed-{args.global_seed}"
-        sample_folder_dir = f"{args.sample_dir}/{folder_name}"
+        sample_folder_dir = f"{args.sample_dir}/{args.ckpt_dir}/{folder_name}"
+        
+        os.makedirs(sample_folder_dir, exist_ok=True)
         if rank == 0:
-            os.makedirs(sample_folder_dir, exist_ok=True)
             print(f"Saving .png samples at {sample_folder_dir}")
         generate(model, diffusion, vae, sample_folder_dir, rank, 
                 device, args.cfg_scale, iterations, n, latent_size)
