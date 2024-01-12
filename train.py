@@ -33,6 +33,11 @@ from diffusion import create_diffusion
 from omegaconf import OmegaConf
 from train_utils.datasets import ImageNetLatentDataset
 
+
+import webdataset as wds
+import pickle
+from itertools import islice
+
 #################################################################################
 #                             Training Helper Functions                         #
 #################################################################################
@@ -100,26 +105,65 @@ def create_logger(logging_dir):
     return logger
 
 
-def center_crop_arr(pil_image, image_size):
-    """
-    Center cropping implementation from ADM.
-    https://github.com/openai/guided-diffusion/blob/8fb3ad9197f16bbc40620447b2742e13458d2831/guided_diffusion/image_datasets.py#L126
-    """
-    while min(*pil_image.size) >= 2 * image_size:
-        pil_image = pil_image.resize(
-            tuple(x // 2 for x in pil_image.size), resample=Image.BOX
+# WebDataset Helper Function
+def nodesplitter(src, group=None):
+    rank, world_size, worker, num_workers = wds.utils.pytorch_worker_info()
+    if world_size > 1:
+        for s in islice(src, rank, None, world_size):
+            yield s
+    else:
+        for s in src:
+            yield s
+
+
+def get_file_paths(dir):
+    return [os.path.join(dir, file) for file in os.listdir(dir)]
+
+
+
+def decode_data(item):
+    output = {}
+    img = pickle.loads(item['latent'])
+    output['latent'] = img
+    label = int(item['cls'].decode('utf-8'))
+    output['label'] = label
+    return output
+
+
+def make_loader(root, mode='train', batch_size=32, 
+                num_workers=4, cache_dir=None, 
+                resampled=False, world_size=1, total_num=1281167, 
+                bufsize=1000, initial=100):
+    data_list = get_file_paths(root)
+    num_batches_in_total =  total_num // (batch_size * world_size)
+    # paths = split_by_proc(data_list, rank, world_size)
+    # print(f'rank: {rank}, world_size: {world_size}, len(paths): {len(paths)}')
+    if resampled:
+        repeat = True
+        splitter = False
+    else:
+        repeat = False
+        splitter = nodesplitter
+    dataset = (
+        wds.WebDataset(
+        data_list, 
+        cache_dir=cache_dir,
+        repeat=repeat,
+        resampled=resampled, 
+        handler=wds.handlers.warn_and_stop, 
+        nodesplitter=splitter,
         )
-
-    scale = image_size / min(*pil_image.size)
-    pil_image = pil_image.resize(
-        tuple(round(x * scale) for x in pil_image.size), resample=Image.BICUBIC
-    )
-
-    arr = np.array(pil_image)
-    crop_y = (arr.shape[0] - image_size) // 2
-    crop_x = (arr.shape[1] - image_size) // 2
-    return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
-
+        .shuffle(bufsize, initial=initial)
+        .map(decode_data, handler=wds.handlers.warn_and_stop)
+        .to_tuple('latent label')
+        .batched(batch_size, partial=False)
+        )
+    
+    # mprint(f'dataset created from {paths}')
+    loader = wds.WebLoader(dataset, batch_size=None, num_workers=num_workers, shuffle=False, persistent_workers=True)
+    if resampled:
+        loader = loader.with_epoch(num_batches_in_total)
+    return loader
 
 #################################################################################
 #                                  Training Loop                                #
@@ -130,16 +174,16 @@ def main(args):
     Trains a new DiT model.
     """
     assert torch.cuda.is_available(), "Training currently requires at least one GPU."
-    config = OmegaConf.load(args.config)
     # Setup DDP:
     dist.init_process_group("nccl")
     assert args.global_batch_size % dist.get_world_size() == 0, f"Batch size must be divisible by world size."
     rank = dist.get_rank()
+    size = dist.get_world_size()
     device = rank % torch.cuda.device_count()
-    seed = args.global_seed * dist.get_world_size() + rank
+    seed = args.global_seed * size + rank
     torch.manual_seed(seed)
     torch.cuda.set_device(device)
-    print(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
+    print(f"Starting rank={rank}, seed={seed}, world_size={size}.")
 
     # Setup an experiment folder:
     if rank == 0:
@@ -182,29 +226,15 @@ def main(args):
         update_ema(ema, model, decay=0)  # Ensure EMA is initialized with synced weights
     model = DDP(model, device_ids=[rank]) 
     # Setup data:
-    dataset = ImageNetLatentDataset(config.data.root, 
-                                    resolution=config.data.resolution, 
-                                    num_channels=config.data.num_channels)
+
+    loader = make_loader(args.data_path, batch_size=args.global_batch_size,
+                         num_workers=args.num_workers, world_size=size)
     
-    sampler = DistributedSampler(
-        dataset,
-        num_replicas=dist.get_world_size(),
-        rank=rank,
-        shuffle=True,
-        seed=args.global_seed
-    )
+
     batch_size_per_gpu = int(args.global_batch_size // dist.get_world_size())
     num_grad_accum = batch_size_per_gpu // args.microbatch
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size_per_gpu,
-        shuffle=False,
-        sampler=sampler,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=True
-    )
-    logger.info(f"Dataset contains {len(dataset):,} images ({config.data.root})")
+
+
 
     # Prepare models for training:
     model.train()  # important! This enables embedding dropout for classifier-free guidance
@@ -217,11 +247,11 @@ def main(args):
 
     logger.info(f"Training for {args.epochs} epochs...")
     for epoch in range(args.epochs):
-        sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
         for x, y in loader:
             x = x.to(device)
-            y = onehot2int(y).to(device)
+            y = y.to(device)
+
             x = sample(x) 
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
             # model_kwargs = dict(y=y)
@@ -252,6 +282,8 @@ def main(args):
                 dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
                 avg_loss = avg_loss.item() / dist.get_world_size()
                 logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
+                logger.info(f'Peak GPU memory usage: {torch.cuda.max_memory_allocated(device) / 1024 ** 3:.2f} GB')
+                logger.info(f'Reserved GPU memory: {torch.cuda.memory_reserved(device) / 1024 ** 3:.2f} GB')
                 # Reset monitoring variables:
                 running_loss = 0
                 log_steps = 0
@@ -283,19 +315,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/imagenet-latent.yaml")
 
-    parser.add_argument("--data-path", type=str, required=True)
-    parser.add_argument("--results-dir", type=str, default="results")
+    parser.add_argument("--data_path", type=str, required=True)
+    parser.add_argument("--results_dir", type=str, default="results")
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")
-    parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
+    parser.add_argument("--image_size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument("--epochs", type=int, default=1400)
-    parser.add_argument("--global-batch-size", type=int, default=256)
+    parser.add_argument("--global_batch_size", type=int, default=256)
     parser.add_argument('--microbatch', type=int, default=32)
-    parser.add_argument("--global-seed", type=int, default=0)
+    parser.add_argument("--global_seed", type=int, default=0)
     parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="ema")  # Choice doesn't affect training
-    parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--log-every", type=int, default=100)
-    parser.add_argument("--ckpt-every", type=int, default=50_000)
+    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--log_every", type=int, default=100)
+    parser.add_argument("--ckpt_every", type=int, default=50_000)
     parser.add_argument('--ckpt', type=str, default=None)
     args = parser.parse_args()
     main(args)
